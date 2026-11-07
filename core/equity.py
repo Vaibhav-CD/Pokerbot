@@ -8,8 +8,12 @@ Provides:
 """
 
 import random
+from typing import TYPE_CHECKING
 from .card import Card, RANK_CHARS
 from .evaluator import evaluate_hand
+
+if TYPE_CHECKING:
+    from strategy.opponent_model import OpponentModel
 
 def get_canonical_hand(c1: int, c2: int) -> str:
     r1, s1 = Card.rank(c1), Card.suit(c1)
@@ -69,11 +73,48 @@ def get_preflop_equity(c1: int, c2: int) -> float:
     key = get_canonical_hand(c1, c2)
     return PREFLOP_EQUITY.get(key, 0.500)
 
+
+# Sorted preflop equities for range-cutoff lookup: the top `w` fraction of
+# hands are those with equity above the (1-w) quantile.
+_SORTED_EQUITIES = sorted(PREFLOP_EQUITY.values())
+
+
+def range_cutoff(width: float) -> float:
+    """Minimum preflop equity for the top-`width` fraction of hands."""
+    width = max(0.05, min(0.95, width))
+    idx = int(len(_SORTED_EQUITIES) * (1.0 - width))
+    return _SORTED_EQUITIES[max(0, min(len(_SORTED_EQUITIES) - 1, idx))]
+
+
+def range_hand_weight(
+    c1: int,
+    c2: int,
+    cutoff: float,
+    strength_slope: float = 0.0,
+    board_ranks: frozenset | None = None,
+    board_hit_bonus: float = 1.0,
+) -> float:
+    """Weight of a villain hole-card combo under an estimated range.
+
+    Hands above `cutoff` get weight 1.0, others a small leakage weight
+    (villains sometimes show up with trash). `strength_slope` tilts weight
+    toward strong hole cards when villain showed aggression; `board_hit_bonus`
+    upweights combos pairing the board when facing a postflop bet.
+    """
+    eq = get_preflop_equity(c1, c2)
+    w = 1.0 if eq >= cutoff else 0.12
+    if strength_slope:
+        w *= 1.0 + strength_slope * (eq - 0.5)
+    if board_hit_bonus != 1.0 and board_ranks:
+        if (c1 >> 2) in board_ranks or (c2 >> 2) in board_ranks:
+            w *= board_hit_bonus
+    return max(0.02, w)
+
 def calculate_equity(
     my_cards: list[int],
     community_cards: list[int],
     opp_revealed_card: int | None = None,
-    num_simulations: int = 70
+    num_simulations: int = 50
 ) -> float:
     """
     Computes equity (win rate + 0.5 * tie rate) given:
@@ -81,16 +122,17 @@ def calculate_equity(
     - community_cards: [c3, c4, c5, ...] (3, 4, or 5 cards)
     - opp_revealed_card: int or None (if we won Sneak Peek auction)
     """
-    dead_cards = set(my_cards) | set(community_cards)
+    dead0, dead1 = my_cards[0], my_cards[1]
+    dead = {dead0, dead1}
+    dead.update(community_cards)
     if opp_revealed_card is not None:
-        dead_cards.add(opp_revealed_card)
-        
-    remaining_deck = [c for c in range(52) if c not in dead_cards]
+        dead.add(opp_revealed_card)
+
+    remaining_deck = [c for c in range(52) if c not in dead]
     n_comm = len(community_cards)
     cards_needed = 5 - n_comm
 
-    # Case A: River (5 community cards) and Opponent Revealed Card is Known
-    # We can do exact enumeration of ALL remaining possible cards for opponent!
+    # Case A: River with revealed card -> exact enumeration over 44 cards.
     if n_comm == 5 and opp_revealed_card is not None:
         my_eval = evaluate_hand(my_cards + community_cards)
         wins = 0.0
@@ -103,34 +145,164 @@ def calculate_equity(
                 wins += 0.5
         return wins / total
 
-    # Case B: Fast Monte Carlo
+    # Case B: Fast Monte Carlo (locals bound for speed).
+    _sample = random.sample
+    _choice = random.choice
+    _eval = evaluate_hand
     wins = 0.0
-    for _ in range(num_simulations):
-        if opp_revealed_card is not None:
-            # Opponent has opp_revealed_card + 1 sampled card
-            if cards_needed == 0:
-                opp_c2 = random.choice(remaining_deck)
-                full_comm = community_cards
-            else:
-                sampled = random.sample(remaining_deck, 1 + cards_needed)
-                opp_c2 = sampled[0]
-                full_comm = community_cards + sampled[1:]
-            opp_cards = [opp_revealed_card, opp_c2]
+    if opp_revealed_card is not None:
+        if cards_needed == 0:
+            for _ in range(num_simulations):
+                opp_eval = _eval([opp_revealed_card, _choice(remaining_deck)] + community_cards)
+                my_eval = _eval(my_cards + community_cards)
+                if my_eval > opp_eval:
+                    wins += 1.0
+                elif my_eval == opp_eval:
+                    wins += 0.5
         else:
-            # Opponent has 2 unknown cards
-            if cards_needed == 0:
-                opp_cards = random.sample(remaining_deck, 2)
-                full_comm = community_cards
-            else:
-                sampled = random.sample(remaining_deck, 2 + cards_needed)
-                opp_cards = sampled[:2]
+            k = 1 + cards_needed
+            for _ in range(num_simulations):
+                sampled = _sample(remaining_deck, k)
+                full_comm = community_cards + sampled[1:]
+                my_eval = _eval(my_cards + full_comm)
+                opp_eval = _eval([opp_revealed_card, sampled[0]] + full_comm)
+                if my_eval > opp_eval:
+                    wins += 1.0
+                elif my_eval == opp_eval:
+                    wins += 0.5
+    else:
+        if cards_needed == 0:
+            for _ in range(num_simulations):
+                opp_cards = _sample(remaining_deck, 2)
+                my_eval = _eval(my_cards + community_cards)
+                opp_eval = _eval(opp_cards + community_cards)
+                if my_eval > opp_eval:
+                    wins += 1.0
+                elif my_eval == opp_eval:
+                    wins += 0.5
+        else:
+            k = 2 + cards_needed
+            for _ in range(num_simulations):
+                sampled = _sample(remaining_deck, k)
                 full_comm = community_cards + sampled[2:]
-
-        my_eval = evaluate_hand(my_cards + full_comm)
-        opp_eval = evaluate_hand(opp_cards + full_comm)
-        if my_eval > opp_eval:
-            wins += 1.0
-        elif my_eval == opp_eval:
-            wins += 0.5
+                my_eval = _eval(my_cards + full_comm)
+                opp_eval = _eval(sampled[:2] + full_comm)
+                if my_eval > opp_eval:
+                    wins += 1.0
+                elif my_eval == opp_eval:
+                    wins += 0.5
 
     return wins / num_simulations
+
+
+def calculate_range_equity(
+    my_cards: list[int],
+    community_cards: list[int],
+    opp_model: "OpponentModel",
+    opp_revealed_card: int | None = None,
+    villain_raised_preflop: bool = False,
+    facing_bet: bool = False,
+    num_simulations: int = 50,
+) -> float:
+    """Equity vs villain's estimated range (importance-weighted Monte Carlo).
+
+    Villain combos are sampled uniformly but weighted by how likely the
+    modeled opponent is to hold them, given VPIP/PFR, this hand's preflop
+    action, and whether we face a postflop bet.
+    """
+    width = opp_model.estimated_range_width(villain_raised_preflop)
+    cutoff = range_cutoff(width)
+
+    # Aggression tilts the range toward strong hole cards.
+    strength_slope = 0.0
+    if villain_raised_preflop:
+        strength_slope += 1.2
+    aggro = opp_model.postflop_aggro_rate
+    if facing_bet and aggro < 0.45:
+        # A rarely-aggressive villain betting means strength.
+        strength_slope += 1.0 * (1.0 - aggro / 0.45)
+
+    board_ranks = frozenset(c >> 2 for c in community_cards)
+    board_hit_bonus = 1.0
+    if facing_bet:
+        board_hit_bonus = 1.0 + 0.6 * (1.0 - min(1.0, aggro / 0.6))
+
+    dead = {my_cards[0], my_cards[1]}
+    dead.update(community_cards)
+    if opp_revealed_card is not None:
+        dead.add(opp_revealed_card)
+    remaining_deck = [c for c in range(52) if c not in dead]
+    n_comm = len(community_cards)
+    cards_needed = 5 - n_comm
+
+    _sample = random.sample
+    _choice = random.choice
+    _eval = evaluate_hand
+    _weight = range_hand_weight
+
+    def _result(my_eval, opp_eval) -> float:
+        if my_eval > opp_eval:
+            return 1.0
+        if my_eval == opp_eval:
+            return 0.5
+        return 0.0
+
+    # River with revealed card: weighted exact enumeration.
+    if n_comm == 5 and opp_revealed_card is not None:
+        my_eval = _eval(my_cards + community_cards)
+        wsum = 0.0
+        wwin = 0.0
+        for second_card in remaining_deck:
+            w = _weight(opp_revealed_card, second_card, cutoff,
+                        strength_slope, board_ranks, board_hit_bonus)
+            opp_eval = _eval([opp_revealed_card, second_card] + community_cards)
+            wsum += w
+            wwin += w * _result(my_eval, opp_eval)
+        return wwin / wsum if wsum > 0 else 0.5
+
+    wsum = 0.0
+    wwin = 0.0
+    if opp_revealed_card is not None:
+        if cards_needed == 0:
+            my_eval = _eval(my_cards + community_cards)
+            for _ in range(num_simulations):
+                c2 = _choice(remaining_deck)
+                w = _weight(opp_revealed_card, c2, cutoff,
+                            strength_slope, board_ranks, board_hit_bonus)
+                opp_eval = _eval([opp_revealed_card, c2] + community_cards)
+                wsum += w
+                wwin += w * _result(my_eval, opp_eval)
+        else:
+            k = 1 + cards_needed
+            for _ in range(num_simulations):
+                sampled = _sample(remaining_deck, k)
+                w = _weight(opp_revealed_card, sampled[0], cutoff,
+                            strength_slope, board_ranks, board_hit_bonus)
+                full_comm = community_cards + sampled[1:]
+                my_eval = _eval(my_cards + full_comm)
+                opp_eval = _eval([opp_revealed_card, sampled[0]] + full_comm)
+                wsum += w
+                wwin += w * _result(my_eval, opp_eval)
+    else:
+        if cards_needed == 0:
+            my_eval = _eval(my_cards + community_cards)
+            for _ in range(num_simulations):
+                o0, o1 = _sample(remaining_deck, 2)
+                w = _weight(o0, o1, cutoff,
+                            strength_slope, board_ranks, board_hit_bonus)
+                opp_eval = _eval([o0, o1] + community_cards)
+                wsum += w
+                wwin += w * _result(my_eval, opp_eval)
+        else:
+            k = 2 + cards_needed
+            for _ in range(num_simulations):
+                sampled = _sample(remaining_deck, k)
+                w = _weight(sampled[0], sampled[1], cutoff,
+                            strength_slope, board_ranks, board_hit_bonus)
+                full_comm = community_cards + sampled[2:]
+                my_eval = _eval(my_cards + full_comm)
+                opp_eval = _eval(sampled[:2] + full_comm)
+                wsum += w
+                wwin += w * _result(my_eval, opp_eval)
+
+    return wwin / wsum if wsum > 0 else 0.5

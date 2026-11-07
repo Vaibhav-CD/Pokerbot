@@ -41,11 +41,12 @@ class RoundState:
         Calculates exact legal min_raise and max_raise (raise TO amount)
         according to the competition rule:
         Minimum Raise = Current Wager + Cost to Call + max(Big Blind, Cost to Call)
-        Maximum Raise = min(Your Chips, Opponent's Chips)
+        Maximum Raise = min(my_wager + my_chips, opp_wager + opp_chips)
+        (raise TO amount; stacks are remaining chips excluding street wagers)
         """
         cost = self.cost_to_call
         min_raise = self.my_wager + cost + max(BIG_BLIND, cost)
-        max_raise = min(self.my_chips, self.opp_chips)
+        max_raise = min(self.my_wager + self.my_chips, self.opp_wager + self.opp_chips)
         return int(min_raise), int(max_raise)
 
     def can_raise(self) -> bool:

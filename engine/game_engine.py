@@ -187,9 +187,11 @@ class SneakPeekEngine:
             delta_bb = total_pot - (STARTING_STACK - bb_state.my_chips)
             delta_sb = -(STARTING_STACK - sb_state.my_chips)
         else:
-            half_pot = total_pot // 2
-            delta_sb = half_pot - (STARTING_STACK - sb_state.my_chips)
-            delta_bb = half_pot - (STARTING_STACK - bb_state.my_chips)
+            # Split pot exactly; odd chip goes to SB (button).
+            sb_share = (total_pot + 1) // 2
+            bb_share = total_pot // 2
+            delta_sb = sb_share - (STARTING_STACK - sb_state.my_chips)
+            delta_bb = bb_share - (STARTING_STACK - bb_state.my_chips)
 
         sb_bot.handle_round_over(sb_state, delta_sb, opp_cards=bb_cards)
         bb_bot.handle_round_over(bb_state, delta_bb, opp_cards=sb_cards)
@@ -290,11 +292,20 @@ class SneakPeekEngine:
         self, sb_bot, bb_bot, sb_state, bb_state, is_preflop: bool, action_log: list | None = None
     ) -> tuple[bool, bool]:
         turn_sb = is_preflop
-        last_action = None
-        consecutive_checks = 0
+        acted_sb = False
+        acted_bb = False
+
+        def _notify_observer(passive_bot, street: str, action: str, faced_bet: bool):
+            fn = getattr(passive_bot, "observe_opp_action", None)
+            if callable(fn):
+                try:
+                    fn(street, action, faced_bet)
+                except Exception:
+                    pass
 
         while True:
             active_bot = sb_bot if turn_sb else bb_bot
+            passive_bot = bb_bot if turn_sb else sb_bot
             active_state = sb_state if turn_sb else bb_state
             passive_state = bb_state if turn_sb else sb_state
 
@@ -309,10 +320,12 @@ class SneakPeekEngine:
 
             cost = active_state.cost_to_call
             min_r, max_r = active_state.legal_raise_bounds()
+            faced_bet = cost > 0
 
             if action == "FOLD":
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "FOLD", "amount": 0, "pot": active_state.pot})
+                _notify_observer(passive_bot, active_state.street, "FOLD", faced_bet)
                 return (True, not turn_sb)
 
             elif action == "CHECK":
@@ -320,39 +333,50 @@ class SneakPeekEngine:
                     if action_log is not None:
                         action_log.append({"street": active_state.street, "player": active_bot.name, "action": "ILLEGAL_CHECK_AUTO_FOLD", "amount": 0, "pot": active_state.pot})
                     return (True, not turn_sb)
-                consecutive_checks += 1
-                last_action = "CHECK"
+                if turn_sb:
+                    acted_sb = True
+                else:
+                    acted_bb = True
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CHECK", "amount": 0, "pot": active_state.pot})
-                if consecutive_checks == 2:
+                _notify_observer(passive_bot, active_state.street, "CHECK", False)
+                if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
                     break
 
             elif action == "CALL":
                 if cost == 0:
-                    consecutive_checks += 1
+                    # Treat as a check.
+                    if turn_sb:
+                        acted_sb = True
+                    else:
+                        acted_bb = True
+                    if action_log is not None:
+                        action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CHECK", "amount": 0, "pot": active_state.pot})
+                    _notify_observer(passive_bot, active_state.street, "CHECK", False)
+                    if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
+                        break
                 else:
-                    consecutive_checks = 0
-                    
-                call_amount = min(cost, active_state.my_chips)
-                active_state.my_chips -= call_amount
-                passive_state.opp_chips -= call_amount
-                active_state.my_wager += call_amount
-                passive_state.opp_wager = active_state.my_wager
-                active_state.pot += call_amount
-                passive_state.pot += call_amount
-
-                if action_log is not None:
-                    action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CALL", "amount": call_amount, "pot": active_state.pot})
-                
-                if is_preflop and turn_sb and active_state.my_wager == BIG_BLIND and passive_state.my_wager == BIG_BLIND and last_action is None:
-                    last_action = "CALL"
-                    turn_sb = not turn_sb
-                    continue
-
-                break
+                    call_amount = min(cost, active_state.my_chips)
+                    active_state.my_chips -= call_amount
+                    passive_state.opp_chips -= call_amount
+                    active_state.my_wager += call_amount
+                    passive_state.opp_wager = active_state.my_wager
+                    active_state.pot += call_amount
+                    passive_state.pot += call_amount
+                    if turn_sb:
+                        acted_sb = True
+                    else:
+                        acted_bb = True
+                    if action_log is not None:
+                        action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CALL", "amount": call_amount, "pot": active_state.pot})
+                    _notify_observer(passive_bot, active_state.street, "CALL", True)
+                    if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
+                        break
+                    # SB limp gives BB the option; otherwise a call closes.
+                    if not (is_preflop and acted_sb and not acted_bb):
+                        break
 
             elif action == "RAISE":
-                consecutive_checks = 0
                 if max_r < min_r or amount < min_r or amount > max_r:
                     if action_log is not None:
                         action_log.append({"street": active_state.street, "player": active_bot.name, "action": f"ILLEGAL_RAISE({amount})_AUTO_FOLD", "amount": 0, "pot": active_state.pot})
@@ -370,10 +394,17 @@ class SneakPeekEngine:
                 passive_state.opp_wager = amount
                 active_state.pot += additional
                 passive_state.pot += additional
-                last_action = "RAISE"
+                # Aggression reopens action for the opponent.
+                if turn_sb:
+                    acted_sb = True
+                    acted_bb = False
+                else:
+                    acted_bb = True
+                    acted_sb = False
 
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "RAISE", "amount": amount, "pot": active_state.pot})
+                _notify_observer(passive_bot, active_state.street, "RAISE", faced_bet)
 
             else:
                 if action_log is not None:

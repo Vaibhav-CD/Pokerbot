@@ -5,7 +5,7 @@ Implements game-theoretic second-price bidding strategy with Value of Informatio
 
 from .opponent_model import OpponentModel
 from core.game_state import RoundState
-from core.equity import calculate_equity
+from core.equity import calculate_range_equity
 
 class AuctionEngine:
     @staticmethod
@@ -20,20 +20,26 @@ class AuctionEngine:
         if opp_model.is_zero_bidder:
             return 1  # Wins their card for 0 chips!
 
-        # 2. Hand strength and vulnerability analysis
-        flop_equity = calculate_equity(state.my_cards, state.community_cards, num_simulations=40)
+        # 2. Hand strength vs villain's estimated range.
+        flop_equity = calculate_range_equity(
+            state.my_cards, state.community_cards, opp_model,
+            villain_raised_preflop=opp_model.pf_raise_this_hand,
+            num_simulations=32,
+        )
         pot = state.pot
         max_possible_bid = min(state.my_chips, state.opp_chips)
 
         # 3. VoI assessment:
-        # If we have complete trash (equity < 0.20), don't spend chips on info
+        # Trash (equity < 0.20): info is worthless to us, but bidding 0 lets
+        # the opponent win for free. Bid 1-2 to tax them (loser pays nothing).
         if flop_equity < 0.20:
-            return 1 if opp_model.median_opp_bid <= 1 else 0
+            tax = 2 if opp_model.median_opp_bid > 10 else 1
+            return max(1, min(tax, max_possible_bid))
 
-        # If we have monster nuts (equity > 0.90), our play is already clear
+        # Nuts (equity > 0.90): info value is low but denial value is high.
+        # Winning keeps the opponent blind so they keep calling.
         if flop_equity > 0.90:
-            # Bid modestly to keep pot manageable or slightly undercut
-            base_bid = int(0.08 * pot)
+            base_bid = max(int(0.12 * pot), opp_model.median_opp_bid + 2)
             return max(1, min(base_bid, max_possible_bid))
 
         # Close, contested, or drawing hands (equity 0.35 - 0.75):

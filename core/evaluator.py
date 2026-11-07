@@ -32,7 +32,7 @@ def evaluate_hand(cards: list[int]) -> tuple:
         rank_mask |= (1 << r)
         suit_masks[s] |= (1 << r)
 
-    # 1. Check Flush
+    # 1. Flush suit detection (straight flush checked first, plain flush later)
     flush_suit = -1
     for s in range(4):
         if suits[s] >= 5:
@@ -41,7 +41,6 @@ def evaluate_hand(cards: list[int]) -> tuple:
 
     if flush_suit != -1:
         f_mask = suit_masks[flush_suit]
-        # Straight flush check
         m = f_mask << 1
         if f_mask & 0x1000:  # Ace
             m |= 1
@@ -49,15 +48,6 @@ def evaluate_hand(cards: list[int]) -> tuple:
         if consec:
             top_rank = (consec.bit_length() - 1) + 3
             return (8, top_rank)
-
-        # Regular flush (top 5 ranks in flush suit)
-        flush_ranks = []
-        for r in range(12, -1, -1):
-            if f_mask & (1 << r):
-                flush_ranks.append(r)
-                if len(flush_ranks) == 5:
-                    break
-        return (5, tuple(flush_ranks))
 
     # 2. Check Straight
     m = rank_mask << 1
@@ -99,7 +89,18 @@ def evaluate_hand(cards: list[int]) -> tuple:
         if pairs:
             return (6, trips[0], pairs[0])
 
-    # 5. Straight
+    # 5. Flush (beats straight, loses to full house)
+    if flush_suit != -1:
+        f_mask = suit_masks[flush_suit]
+        flush_ranks = []
+        for r in range(12, -1, -1):
+            if f_mask & (1 << r):
+                flush_ranks.append(r)
+                if len(flush_ranks) == 5:
+                    break
+        return (5, tuple(flush_ranks))
+
+    # 6. Straight
     if has_straight:
         return (4, straight_top)
 

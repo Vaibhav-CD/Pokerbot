@@ -24,6 +24,7 @@ class SneakPeekBot(BaseBot):
     def handle_new_round(self, round_num: int, is_sb: bool, my_cards: list[int]):
         self.current_cards = list(my_cards)
         self.opp_model.total_hands += 1
+        self.opp_model.new_hand()
 
     def handle_auction_query(self, state: RoundState) -> int:
         try:
@@ -90,6 +91,14 @@ class SneakPeekBot(BaseBot):
     ):
         if opp_bid is not None:
             self.opp_model.record_auction_bid(opp_bid)
+
+    def observe_opp_action(self, street: str, action_type: str, faced_bet: bool = False, **kwargs):
+        if "faced_raise" in kwargs and kwargs["faced_raise"] is not None:
+            faced_bet = kwargs["faced_raise"]
+        try:
+            self.opp_model.observe(street, action_type, faced_bet=faced_bet)
+        except Exception:
+            pass
 
     def handle_round_over(self, state: RoundState, chip_delta: int, opp_cards: list[int] | None = None):
         # We can update opponent profile here if showdown cards are revealed

@@ -48,8 +48,9 @@ class PreflopEngine:
                 if equity >= 0.40:
                     return ("CALL", 0)
 
-                # Weak trash
-                return ("FOLD", 0)
+                # Trash: completing costs 10 into a 30 pot (25% pot odds) and
+                # even 72o has ~35% equity heads-up, plus position postflop.
+                return ("CALL", 0)
 
             # Facing a 3-bet / raise from BB (cost > 10)
             else:

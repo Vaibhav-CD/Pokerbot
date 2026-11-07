@@ -33,3 +33,7 @@ class BaseBot(ABC):
     @abstractmethod
     def handle_round_over(self, state: RoundState, chip_delta: int, opp_cards: list[int] | None = None):
         pass
+
+    def observe_opp_action(self, street: str, action_type: str, faced_bet: bool = False, **kwargs):
+        """Optional hook: engine notifies this bot of each opponent action."""
+        pass

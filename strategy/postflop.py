@@ -8,8 +8,7 @@ Combines:
 """
 
 from core.game_state import RoundState, BIG_BLIND
-from core.equity import calculate_equity
-from core.card import Card
+from core.equity import calculate_range_equity
 from .opponent_model import OpponentModel
 
 class PostflopEngine:
@@ -25,27 +24,18 @@ class PostflopEngine:
         can_raise = state.can_raise()
         min_r, max_r = state.legal_raise_bounds()
 
-        # 1. Compute Equity conditioned on Sneak Peek information
-        # 60 simulations is ultra-fast (< 1ms) and accurate
-        equity = calculate_equity(
+        # 1. Range-vs-range equity: villain combos weighted by their
+        # estimated range (VPIP/PFR, this hand's preflop action, facing bet).
+        num_sims = 40 if state.street == "RIVER" else 50
+        equity = calculate_range_equity(
             state.my_cards,
             state.community_cards,
+            opp_model,
             opp_revealed_card=state.opp_revealed_card,
-            num_simulations=60
+            villain_raised_preflop=opp_model.pf_raise_this_hand,
+            facing_bet=cost > 0,
+            num_simulations=num_sims
         )
-
-        # 2. Adjust for revealed card synergy if we won auction
-        if state.opp_revealed_card is not None:
-            opp_r = Card.rank(state.opp_revealed_card)
-            board_ranks = [Card.rank(c) for c in state.community_cards]
-            
-            # If opponent's revealed card matches top card on board, give them credit for top pair
-            if opp_r in board_ranks:
-                # Their range is weighted towards strong hands
-                equity = max(0.05, equity - 0.05)
-            elif opp_r < min(board_ranks):
-                # Opponent holds an undercard to board, range is weakened
-                equity = min(0.95, equity + 0.05)
 
         # 3. Pot Odds threshold
         if cost > 0:
