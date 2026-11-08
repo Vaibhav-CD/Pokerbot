@@ -144,6 +144,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+import re
+
+def clean_html(raw_html: str) -> str:
+    """Strips HTML comments and whitespace indents to prevent markdown code block formatting."""
+    s = re.sub(r'<!--.*?-->', '', raw_html, flags=re.DOTALL)
+    lines = [line.strip() for line in s.splitlines() if line.strip()]
+    return ' '.join(lines)
+
 def render_card_box(card_str: str, is_revealed: bool = False) -> str:
     if not card_str or len(card_str) != 2:
         return ""
@@ -151,18 +159,11 @@ def render_card_box(card_str: str, is_revealed: bool = False) -> str:
     suit_symbol = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}.get(s, s)
     color = "red" if s in ("h", "d") else "black"
     glow = "card-revealed-glow" if is_revealed else ""
-    return f"""
-    <div class="poker-card {color} {glow}">
-        <div class="poker-card-rank">{r}</div>
-        <div class="poker-card-suit">{suit_symbol}</div>
-    </div>
-    """
+    return f'<div class="poker-card {color} {glow}"><div class="poker-card-rank">{r}</div><div class="poker-card-suit">{suit_symbol}</div></div>'
 
 def render_cards_html(cards: list[str], revealed_card: str | None = None) -> str:
-    html = ""
-    for c in cards:
-        html += render_card_box(c, is_revealed=(c == revealed_card))
-    return f"<div style='display:inline-block;'>{html}</div>"
+    cards_html = "".join(render_card_box(c, is_revealed=(c == revealed_card)) for c in cards)
+    return f"<div style='display:inline-block;'>{cards_html}</div>"
 
 # --- TOP NAVIGATION TABS ---
 st.title("🃏 IIT Pokerbots 2026: Sneak Peek Hold'em Arena")
@@ -240,17 +241,14 @@ with tabs[0]:
             bot1_dealer = "<span class='dealer-button'>D</span>" if r['bot1_is_sb'] else ""
             bot2_dealer = "<span class='dealer-button'>D</span>" if not r['bot1_is_sb'] else ""
 
-            st.markdown(f"""
+            table_html = f"""
             <div class="poker-table-container">
                 <div class="table-felt-inner">
-                    <!-- OPPONENT (TOP) -->
                     <div style="margin-bottom: 15px;">
                         <span style="font-weight: 700; font-size: 16px;">{r['bot2_name']}</span> {bot2_dealer}
                         <br/>
                         {render_cards_html(r['bot2_cards'], revealed_card=rev_card_str if auc.get('winner') == 'SneakPeekAI' else None)}
                     </div>
-
-                    <!-- COMMUNITY BOARD & POT (CENTER) -->
                     <div style="margin: 25px 0;">
                         <div class="pot-chip-badge">POT: {r['actions'][-1]['pot'] if r['actions'] else 30} CHIPS</div>
                         <br/><br/>
@@ -258,16 +256,12 @@ with tabs[0]:
                             {render_cards_html(r['community_cards']) if r['community_cards'] else "<span style='opacity:0.6; font-style:italic;'>Hand folded before flop dealt</span>"}
                         </div>
                     </div>
-
-                    <!-- SNEAK PEEK AUCTION BANNER -->
                     <div class="auction-banner">
                         <span style="color:#ffb703; font-weight:800;">🏷️ SNEAK PEEK VICKREY AUCTION:</span><br/>
                         SneakPeekAI Bid: <b>{auc.get('bot1_bid', 0)}</b> | {r['bot2_name']} Bid: <b>{auc.get('bot2_bid', 0)}</b><br/>
                         Winner: <b>{auc.get('winner', 'None')}</b> (Paid <b>{auc.get('payment', 0)}</b> into pot) |
                         Revealed Card: <b>{rev_card_str if rev_card_str else 'None'}</b>
                     </div>
-
-                    <!-- SNEAKPEEKAI (BOTTOM) -->
                     <div style="margin-top: 15px;">
                         {render_cards_html(r['bot1_cards'], revealed_card=rev_card_str if auc.get('winner') == r['bot2_name'] else None)}
                         <br/>
@@ -277,7 +271,8 @@ with tabs[0]:
                     </div>
                 </div>
             </div>
-            """, unsafe_allow_html=True)
+            """
+            st.markdown(clean_html(table_html), unsafe_allow_html=True)
 
             with st.expander("📜 Step-by-Step Action Log", expanded=False):
                 st.dataframe(pd.DataFrame(r["actions"]), use_container_width=True)
@@ -349,7 +344,7 @@ with tabs[1]:
 
         # Visual Table
         rev_to_u_str = Card.to_str(hg["revealed_to_user"]) if hg["revealed_to_user"] is not None else None
-        st.markdown(f"""
+        user_table_html = f"""
         <div class="poker-table-container">
             <div class="table-felt-inner">
                 <div>
@@ -366,7 +361,8 @@ with tabs[1]:
                 </div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """
+        st.markdown(clean_html(user_table_html), unsafe_allow_html=True)
 
         # Decision Controls
         if not hg["game_over"]:
@@ -531,7 +527,7 @@ with tabs[3]:
         grid_html += "</tr>"
 
     grid_html += "</table></div>"
-    st.markdown(grid_html, unsafe_allow_html=True)
+    st.markdown(clean_html(grid_html), unsafe_allow_html=True)
     st.markdown(r"""
     **Legend:**
     * <span style='color:#2a9d8f; font-weight:bold;'>Teal (Premium >= 70%)</span>: 3-Bet / 4-Bet for value (AA, KK, QQ, AKs).
