@@ -1,34 +1,42 @@
 """
 Adaptive Opponent Modeling & Exploitation Engine.
-Tracks running statistics across 1,000 hands and identifies leaks:
-- Preflop: VPIP, PFR, fold to raise.
-- Auction: Bid distribution, zero-bid frequency, median bid.
-- Postflop: Aggression factor, fold to bet frequency.
+Tracks running statistics across 1,000 hands with dual-horizon tracking:
+- Lifetime statistics (long-term baseline)
+- Recency-weighted rolling window (last 40 actions) to detect strategy shifts & tilt
+- Auction bid distribution & zero-bid leaks
 """
+
+from collections import deque
 
 class OpponentModel:
     def __init__(self):
         self.total_hands = 0
 
-        # Preflop tracking
+        # Lifetime Preflop tracking
         self.opp_vpip_count = 0
         self.opp_pfr_count = 0
         self.opp_faced_raise_count = 0
         self.opp_folded_to_raise_count = 0
 
-        # Auction tracking
+        # Lifetime Auction tracking
         self.opp_bids: list[int] = []
         self.opp_zero_bids = 0
 
-        # Postflop tracking
+        # Lifetime Postflop tracking
         self.opp_bets_raises = 0
         self.opp_calls = 0
         self.opp_folds_postflop = 0
         self.opp_faced_postflop_bets = 0
 
-        # Per-hand action flags (reset via new_hand each round)
+        # Per-hand action flags
         self.pf_vpip_this_hand = False
         self.pf_raise_this_hand = False
+
+        # Recency-weighted buffers (last 40 hands)
+        self.recent_vpip = deque(maxlen=40)
+        self.recent_pfr = deque(maxlen=40)
+        self.recent_postflop_bets = deque(maxlen=40)
+        self.recent_bids = deque(maxlen=25)
 
     def new_hand(self):
         self.pf_vpip_this_hand = False
@@ -36,13 +44,20 @@ class OpponentModel:
 
     def record_auction_bid(self, bid: int):
         self.opp_bids.append(bid)
+        self.recent_bids.append(bid)
         if bid <= 1:
             self.opp_zero_bids += 1
 
     def record_preflop_action(self, action_type: str, faced_raise: bool = False):
-        if action_type in ("CALL", "RAISE"):
+        is_vpip = action_type in ("CALL", "RAISE")
+        is_pfr = action_type == "RAISE"
+        
+        self.recent_vpip.append(1 if is_vpip else 0)
+        self.recent_pfr.append(1 if is_pfr else 0)
+
+        if is_vpip:
             self.opp_vpip_count += 1
-        if action_type == "RAISE":
+        if is_pfr:
             self.opp_pfr_count += 1
         if faced_raise:
             self.opp_faced_raise_count += 1
@@ -50,7 +65,10 @@ class OpponentModel:
                 self.opp_folded_to_raise_count += 1
 
     def record_postflop_action(self, action_type: str, faced_bet: bool = False):
-        if action_type in ("BET", "RAISE"):
+        is_aggro = action_type in ("BET", "RAISE")
+        self.recent_postflop_bets.append(1 if is_aggro else 0)
+
+        if is_aggro:
             self.opp_bets_raises += 1
         elif action_type == "CALL":
             self.opp_calls += 1
@@ -60,18 +78,26 @@ class OpponentModel:
         if faced_bet:
             self.opp_faced_postflop_bets += 1
 
-    # Computed metrics
+    # Computed metrics (blended: 60% recent, 40% lifetime when recent available)
     @property
     def vpip(self) -> float:
         if self.total_hands == 0:
             return 0.50
-        return self.opp_vpip_count / self.total_hands
+        lifetime = self.opp_vpip_count / self.total_hands
+        if len(self.recent_vpip) >= 15:
+            recent = sum(self.recent_vpip) / len(self.recent_vpip)
+            return 0.60 * recent + 0.40 * lifetime
+        return lifetime
 
     @property
     def pfr(self) -> float:
         if self.total_hands == 0:
             return 0.25
-        return self.opp_pfr_count / self.total_hands
+        lifetime = self.opp_pfr_count / self.total_hands
+        if len(self.recent_pfr) >= 15:
+            recent = sum(self.recent_pfr) / len(self.recent_pfr)
+            return 0.60 * recent + 0.40 * lifetime
+        return lifetime
 
     @property
     def fold_to_steal(self) -> float:
@@ -87,16 +113,20 @@ class OpponentModel:
 
     @property
     def median_opp_bid(self) -> int:
-        if not self.opp_bids:
-            return 10  # baseline assumption
-        sorted_bids = sorted(self.opp_bids)
+        # Use recent bids if available, else lifetime
+        bids = list(self.recent_bids) if len(self.recent_bids) >= 5 else self.opp_bids
+        if not bids:
+            return 10
+        sorted_bids = sorted(bids)
         return sorted_bids[len(sorted_bids) // 2]
 
     @property
     def is_zero_bidder(self) -> bool:
         """Returns True if opponent consistently bids 0 or 1 in auction."""
-        if len(self.opp_bids) >= 3:
-            return (self.opp_zero_bids / len(self.opp_bids)) > 0.60
+        bids = list(self.recent_bids) if len(self.recent_bids) >= 5 else self.opp_bids
+        if len(bids) >= 3:
+            zero_cnt = sum(1 for b in bids if b <= 1)
+            return (zero_cnt / len(bids)) > 0.60
         return False
 
     def observe(self, street: str, action_type: str, faced_bet: bool = False):
@@ -113,6 +143,14 @@ class OpponentModel:
     @property
     def postflop_aggro_rate(self) -> float:
         """Fraction of postflop actions that are bets/raises."""
+        if len(self.recent_postflop_bets) >= 15:
+            recent_rate = sum(self.recent_postflop_bets) / len(self.recent_postflop_bets)
+            lifetime_total = self.opp_bets_raises + self.opp_calls + self.opp_folds_postflop
+            if lifetime_total > 0:
+                lifetime_rate = self.opp_bets_raises / lifetime_total
+                return 0.60 * recent_rate + 0.40 * lifetime_rate
+            return recent_rate
+
         total = self.opp_bets_raises + self.opp_calls + self.opp_folds_postflop
         if total == 0:
             return 0.30

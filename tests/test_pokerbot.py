@@ -342,6 +342,25 @@ class TestRangeEquity(unittest.TestCase):
         self.assertLess(_tight_raising_model().estimated_range_width(True), 0.25)
         self.assertGreater(_loose_passive_model().estimated_range_width(False), 0.60)
 
+    def test_blocker_nut_flush_detection(self):
+        from core.blockers import analyze_blockers
+        # Board has 3 hearts: Kh, 8h, 2h. We hold Ah (nut flush blocker) and 9s
+        my = C('Ah', '9s')
+        board = C('Kh', '8h', '2h')
+        rep = analyze_blockers(my, board)
+        self.assertTrue(rep.nut_flush_blocker)
+        self.assertGreater(rep.bluff_equity_boost, 0.05)
+
+    def test_pot_geometry_sizing(self):
+        from strategy.pot_geometry import geometric_bet_fraction, get_optimal_bet_size
+        # SPR = 10, 3 streets -> geometric fraction should be around 0.85
+        f = geometric_bet_fraction(10.0, 3)
+        self.assertGreater(f, 0.50)
+        self.assertLess(f, 1.20)
+        # Sizing with monster equity (0.90) in 200 pot
+        amt = get_optimal_bet_size("FLOP", 4000, 4000, 200, 0.90)
+        self.assertGreater(amt, 100)
+
 
 if __name__ == '__main__':
     unittest.main()

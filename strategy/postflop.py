@@ -1,14 +1,17 @@
 """
-Post-Flop Strategy Engine (Flop, Turn, River).
+Optimized Post-Flop Strategy Engine (Flop, Turn, River).
 Combines:
-- Exact/Monte-Carlo conditioned equity on Sneak Peek revealed card.
-- Pot Odds and Expected Value (EV).
-- Exploitation of opponent tendencies (Calling Station vs Nit).
-- Precise legal bet sizing using competition rules.
+- Conditioned Range-vs-Range Monte Carlo Equity (Sneak Peek revealed card integration).
+- Card Removal & Blocker Analysis (Nut flush blockers, straight blockers, board blockers).
+- Stack-to-Pot Ratio (SPR) & Multi-Street Geometric Bet Sizing.
+- Opponent Profiling (Calling station exploitation vs nit exploitation).
+- Strict competition raise legality bounds.
 """
 
 from core.game_state import RoundState, BIG_BLIND
 from core.equity import calculate_range_equity
+from core.blockers import analyze_blockers
+from strategy.pot_geometry import get_optimal_bet_size, calculate_spr
 from .opponent_model import OpponentModel
 
 class PostflopEngine:
@@ -24,9 +27,8 @@ class PostflopEngine:
         can_raise = state.can_raise()
         min_r, max_r = state.legal_raise_bounds()
 
-        # 1. Range-vs-range equity: villain combos weighted by their
-        # estimated range (VPIP/PFR, this hand's preflop action, facing bet).
-        num_sims = 40 if state.street == "RIVER" else 50
+        # 1. Range-vs-range equity conditioned on villain's range & revealed card
+        num_sims = 40 if state.street == "RIVER" else 48
         equity = calculate_range_equity(
             state.my_cards,
             state.community_cards,
@@ -37,39 +39,53 @@ class PostflopEngine:
             num_simulations=num_sims
         )
 
-        # 3. Pot Odds threshold
-        if cost > 0:
-            pot_odds = cost / (pot + cost)
-        else:
-            pot_odds = 0.0
+        # 2. Card Removal & Blocker Analysis
+        blockers = analyze_blockers(state.my_cards, state.community_cards)
 
-        # Adjust calling threshold based on opponent profile
+        # 3. Pot Odds threshold
+        pot_odds = (cost / (pot + cost)) if cost > 0 else 0.0
+
+        # 4. Opponent Profiler & Blocker EV adjustments
         call_discount = 0.0
         if opp_model.is_tight_passive:
-            # When a tight player bets, they have it! Be more conservative
-            call_discount = -0.06
+            # Tight passive players rarely bet without monster holdings
+            call_discount -= 0.06
         elif opp_model.is_calling_station:
-            # Calling stations don't fold, so don't bluff them
-            call_discount = 0.02
+            # Calling stations call down light, so we call lighter and bet bigger
+            call_discount += 0.02
+
+        # Blocker boost for bluff-catching (e.g. we hold the Ace of the flush suit)
+        if cost > 0 and blockers.nut_flush_blocker:
+            call_discount += 0.04
+        if cost > 0 and blockers.top_pair_blocker:
+            call_discount += 0.03
 
         effective_equity = equity + call_discount
 
-        # === 4. DECISION TREE ===
+        # === 5. DECISION TREE ===
 
-        # Scenario A: Facing a Bet or Raise (cost > 0)
+        # --- SCENARIO A: FACING A BET OR RAISE (cost > 0) ---
         if cost > 0:
-            # Monster Hand (Equity >= 0.82): Raise for value
+            # Monster Holding (Effective Equity >= 0.82): Raise for geometric value
             if effective_equity >= 0.82 and can_raise:
-                target_raise = state.my_wager + cost + max(int(0.66 * pot), BIG_BLIND)
+                opt_bet = get_optimal_bet_size(
+                    state.street, state.my_chips, state.opp_chips, pot, effective_equity,
+                    is_calling_station=opp_model.is_calling_station
+                )
+                target_raise = state.my_wager + cost + max(opt_bet, BIG_BLIND)
                 clamped = state.clamp_raise(target_raise)
                 if clamped >= min_r:
                     return ("RAISE", clamped)
                 return ("CALL", 0)
 
-            # Very Strong Hand (Equity >= 0.65): Call or Raise
-            if effective_equity >= 0.65:
-                if can_raise and effective_equity >= 0.75:
-                    target_raise = state.my_wager + cost + max(int(0.50 * pot), BIG_BLIND)
+            # Very Strong Holding (Effective Equity 0.66 - 0.82)
+            if effective_equity >= 0.66:
+                if can_raise and effective_equity >= 0.74 and not opp_model.is_tight_passive:
+                    opt_bet = get_optimal_bet_size(
+                        state.street, state.my_chips, state.opp_chips, pot, effective_equity,
+                        is_calling_station=opp_model.is_calling_station
+                    )
+                    target_raise = state.my_wager + cost + max(opt_bet, BIG_BLIND)
                     clamped = state.clamp_raise(target_raise)
                     if clamped >= min_r:
                         return ("RAISE", clamped)
@@ -79,44 +95,54 @@ class PostflopEngine:
             if effective_equity >= pot_odds:
                 return ("CALL", 0)
 
-            # Speculative Draw (Flop/Turn only, small bet to call)
-            if state.street in ("FLOP", "TURN") and cost <= int(0.25 * pot) and effective_equity >= pot_odds - 0.08:
-                return ("CALL", 0)
+            # Speculative Draw (Flop/Turn only with strong drawing potential or cheap odds)
+            if state.street in ("FLOP", "TURN"):
+                if cost <= int(0.28 * pot) and (effective_equity >= pot_odds - 0.08 or blockers.nut_flush_blocker):
+                    return ("CALL", 0)
 
-            # Unprofitable: Fold
+            # Negative EV: Fold
             return ("FOLD", 0)
 
-        # Scenario B: Unopened pot (cost == 0, Check is legal)
+        # --- SCENARIO B: UNOPENED POT (cost == 0, Check is legal) ---
         else:
-            # Monster Value (Equity >= 0.75): Bet for value
-            if effective_equity >= 0.75 and can_raise:
-                # Bet 60% of pot
-                target_bet = state.my_wager + max(int(0.60 * pot), BIG_BLIND)
-                clamped = state.clamp_raise(target_bet)
+            # Monster Value (Effective Equity >= 0.78): Geometric sizing to build pot
+            if effective_equity >= 0.78 and can_raise:
+                opt_bet = get_optimal_bet_size(
+                    state.street, state.my_chips, state.opp_chips, pot, effective_equity,
+                    is_calling_station=opp_model.is_calling_station
+                )
+                target = state.my_wager + max(opt_bet, BIG_BLIND)
+                clamped = state.clamp_raise(target)
                 if clamped >= min_r:
                     return ("RAISE", clamped)
                 return ("CHECK", 0)
 
-            # Medium Value (Equity 0.55 - 0.75): Bet 35%-45% of pot
+            # Solid Value (Effective Equity 0.58 - 0.78)
             if effective_equity >= 0.58 and can_raise:
-                target_bet = state.my_wager + max(int(0.40 * pot), BIG_BLIND)
-                clamped = state.clamp_raise(target_bet)
+                opt_bet = get_optimal_bet_size(
+                    state.street, state.my_chips, state.opp_chips, pot, effective_equity,
+                    is_calling_station=opp_model.is_calling_station
+                )
+                target = state.my_wager + max(opt_bet, BIG_BLIND)
+                clamped = state.clamp_raise(target)
                 if clamped >= min_r:
                     return ("RAISE", clamped)
                 return ("CHECK", 0)
 
-            # Semi-bluff / C-Bet:
-            # If opponent folds to c-bets easily and we have position or some equity
+            # Blocker-Assisted Semi-Bluff / C-Bet:
+            # When opponent folds to c-bets easily (> 42%) and we have blocker leverage or equity:
+            bluff_equity = equity + blockers.bluff_equity_boost
             if (
-                opp_model.fold_to_cbet > 0.45
-                and effective_equity >= 0.35
+                opp_model.fold_to_cbet > 0.42
+                and bluff_equity >= 0.38
                 and can_raise
                 and state.street in ("FLOP", "TURN")
             ):
+                # 33% pot small c-bet (high risk/reward ratio)
                 target_bet = state.my_wager + max(int(0.33 * pot), BIG_BLIND)
                 clamped = state.clamp_raise(target_bet)
                 if clamped >= min_r:
                     return ("RAISE", clamped)
 
-            # Default: Take free card with check
+            # Default: Pot control with Check
             return ("CHECK", 0)
