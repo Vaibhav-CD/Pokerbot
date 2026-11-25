@@ -28,7 +28,7 @@ class PostflopEngine:
         min_r, max_r = state.legal_raise_bounds()
 
         # 1. Range-vs-range equity conditioned on villain's range & revealed card
-        num_sims = 40 if state.street == "RIVER" else 48
+        num_sims = 24 if state.street == "RIVER" else 30
         equity = calculate_range_equity(
             state.my_cards,
             state.community_cards,
@@ -60,9 +60,22 @@ class PostflopEngine:
         if cost > 0 and blockers.top_pair_blocker:
             call_discount += 0.03
 
+        # 5. Revealed Card Asymmetry: Opponent's perspective of our holding
+        if state.my_revealed_card is not None and state.community_cards:
+            my_rev_r = state.my_revealed_card >> 2
+            board_ranks = [c >> 2 for c in state.community_cards]
+            max_board_r = max(board_ranks)
+            min_board_r = min(board_ranks)
+            if my_rev_r >= max_board_r:
+                # Villain sees top pair in our hand -> respects our bets more
+                call_discount += 0.03
+            elif my_rev_r < min_board_r and not blockers.nut_flush_blocker:
+                # Villain sees an undercard -> less likely to fold to our bluffs
+                call_discount -= 0.04
+
         effective_equity = equity + call_discount
 
-        # === 5. DECISION TREE ===
+        # === 6. DECISION TREE ===
 
         # --- SCENARIO A: FACING A BET OR RAISE (cost > 0) ---
         if cost > 0:
@@ -72,6 +85,7 @@ class PostflopEngine:
                     state.street, state.my_chips, state.opp_chips, pot, effective_equity,
                     is_calling_station=opp_model.is_calling_station
                 )
+                opt_bet = opp_model.get_exploitative_bet_cap(opt_bet)
                 target_raise = state.my_wager + cost + max(opt_bet, BIG_BLIND)
                 clamped = state.clamp_raise(target_raise)
                 if clamped >= min_r:
@@ -85,6 +99,7 @@ class PostflopEngine:
                         state.street, state.my_chips, state.opp_chips, pot, effective_equity,
                         is_calling_station=opp_model.is_calling_station
                     )
+                    opt_bet = opp_model.get_exploitative_bet_cap(opt_bet)
                     target_raise = state.my_wager + cost + max(opt_bet, BIG_BLIND)
                     clamped = state.clamp_raise(target_raise)
                     if clamped >= min_r:
@@ -111,6 +126,7 @@ class PostflopEngine:
                     state.street, state.my_chips, state.opp_chips, pot, effective_equity,
                     is_calling_station=opp_model.is_calling_station
                 )
+                opt_bet = opp_model.get_exploitative_bet_cap(opt_bet)
                 target = state.my_wager + max(opt_bet, BIG_BLIND)
                 clamped = state.clamp_raise(target)
                 if clamped >= min_r:
@@ -123,6 +139,7 @@ class PostflopEngine:
                     state.street, state.my_chips, state.opp_chips, pot, effective_equity,
                     is_calling_station=opp_model.is_calling_station
                 )
+                opt_bet = opp_model.get_exploitative_bet_cap(opt_bet)
                 target = state.my_wager + max(opt_bet, BIG_BLIND)
                 clamped = state.clamp_raise(target)
                 if clamped >= min_r:
@@ -130,16 +147,17 @@ class PostflopEngine:
                 return ("CHECK", 0)
 
             # Blocker-Assisted Semi-Bluff / C-Bet:
-            # When opponent folds to c-bets easily (> 42%) and we have blocker leverage or equity:
+            # When opponent folds to c-bets easily or has demonstrated a folding threshold:
             bluff_equity = equity + blockers.bluff_equity_boost
+            has_fold_leak = (opp_model.fold_to_cbet > 0.40) or (opp_model.min_folded_cost is not None and len(opp_model.opp_fold_costs) >= 2)
             if (
-                opp_model.fold_to_cbet > 0.42
-                and bluff_equity >= 0.38
+                has_fold_leak
+                and bluff_equity >= 0.32
                 and can_raise
                 and state.street in ("FLOP", "TURN")
             ):
-                # 33% pot small c-bet (high risk/reward ratio)
-                target_bet = state.my_wager + max(int(0.33 * pot), BIG_BLIND)
+                bluff_size = opp_model.get_exploitative_bluff_target(min_r, pot)
+                target_bet = state.my_wager + max(bluff_size, BIG_BLIND)
                 clamped = state.clamp_raise(target_bet)
                 if clamped >= min_r:
                     return ("RAISE", clamped)

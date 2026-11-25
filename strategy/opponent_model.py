@@ -7,6 +7,7 @@ Tracks running statistics across 1,000 hands with dual-horizon tracking:
 """
 
 from collections import deque
+from core.game_state import BIG_BLIND
 
 class OpponentModel:
     def __init__(self):
@@ -37,6 +38,12 @@ class OpponentModel:
         self.recent_pfr = deque(maxlen=40)
         self.recent_postflop_bets = deque(maxlen=40)
         self.recent_bids = deque(maxlen=25)
+
+        # Cost elasticity tracking (how much villain calls vs folds)
+        self.opp_fold_costs: list[int] = []
+        self.opp_call_costs: list[int] = []
+        self.recent_fold_costs = deque(maxlen=25)
+        self.recent_call_costs = deque(maxlen=25)
 
     def new_hand(self):
         self.pf_vpip_this_hand = False
@@ -129,8 +136,8 @@ class OpponentModel:
             return (zero_cnt / len(bids)) > 0.60
         return False
 
-    def observe(self, street: str, action_type: str, faced_bet: bool = False):
-        """Route one observed opponent action into preflop/postflop stats."""
+    def observe(self, street: str, action_type: str, faced_bet: bool = False, amount: int = 0, pot: int = 0, **kwargs):
+        """Route one observed opponent action into preflop/postflop stats and cost elasticity."""
         if street == "PREFLOP":
             self.record_preflop_action(action_type, faced_raise=faced_bet)
             if action_type in ("CALL", "RAISE"):
@@ -139,6 +146,48 @@ class OpponentModel:
                 self.pf_raise_this_hand = True
         elif street in ("FLOP", "TURN", "RIVER"):
             self.record_postflop_action(action_type, faced_bet=faced_bet)
+
+        if faced_bet and amount > 0:
+            if action_type == "FOLD":
+                self.opp_fold_costs.append(amount)
+                self.recent_fold_costs.append(amount)
+            elif action_type == "CALL":
+                self.opp_call_costs.append(amount)
+                self.recent_call_costs.append(amount)
+
+    @property
+    def min_folded_cost(self) -> int | None:
+        costs = list(self.recent_fold_costs) if len(self.recent_fold_costs) >= 2 else self.opp_fold_costs
+        return min(costs) if costs else None
+
+    @property
+    def max_called_cost(self) -> int | None:
+        costs = list(self.recent_call_costs) if len(self.recent_call_costs) >= 2 else self.opp_call_costs
+        return max(costs) if costs else None
+
+    def get_exploitative_bet_cap(self, default_bet: int) -> int:
+        """
+        If villain has a demonstrated fold threshold (they fold when cost > threshold),
+        caps value bets just below that threshold so villain calls instead of folding.
+        """
+        if self.is_calling_station:
+            return default_bet
+
+        thresh = self.min_folded_cost
+        if thresh is not None and len(self.opp_fold_costs) >= 2:
+            safe_call_target = max(BIG_BLIND, thresh - 5)
+            return min(default_bet, safe_call_target)
+        return default_bet
+
+    def get_exploitative_bluff_target(self, min_raise: int, pot: int) -> int:
+        """
+        If villain has a known fold threshold, sizes bluff just above threshold
+        to force a fold with minimal risk.
+        """
+        thresh = self.min_folded_cost
+        if thresh is not None and len(self.opp_fold_costs) >= 2:
+            return max(min_raise, thresh + 5)
+        return max(min_raise, int(0.40 * pot))
 
     @property
     def postflop_aggro_rate(self) -> float:

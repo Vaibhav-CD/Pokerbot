@@ -295,11 +295,16 @@ class SneakPeekEngine:
         acted_sb = False
         acted_bb = False
 
-        def _notify_observer(passive_bot, street: str, action: str, faced_bet: bool):
+        def _notify_observer(passive_bot, street: str, action: str, faced_bet: bool, amount: int = 0, pot: int = 0):
             fn = getattr(passive_bot, "observe_opp_action", None)
             if callable(fn):
                 try:
-                    fn(street, action, faced_bet)
+                    fn(street, action, faced_bet, amount=amount, pot=pot)
+                except TypeError:
+                    try:
+                        fn(street, action, faced_bet)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -325,7 +330,7 @@ class SneakPeekEngine:
             if action == "FOLD":
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "FOLD", "amount": 0, "pot": active_state.pot})
-                _notify_observer(passive_bot, active_state.street, "FOLD", faced_bet)
+                _notify_observer(passive_bot, active_state.street, "FOLD", faced_bet, amount=cost, pot=active_state.pot)
                 return (True, not turn_sb)
 
             elif action == "CHECK":
@@ -339,7 +344,7 @@ class SneakPeekEngine:
                     acted_bb = True
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CHECK", "amount": 0, "pot": active_state.pot})
-                _notify_observer(passive_bot, active_state.street, "CHECK", False)
+                _notify_observer(passive_bot, active_state.street, "CHECK", False, amount=0, pot=active_state.pot)
                 if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
                     break
 
@@ -352,7 +357,7 @@ class SneakPeekEngine:
                         acted_bb = True
                     if action_log is not None:
                         action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CHECK", "amount": 0, "pot": active_state.pot})
-                    _notify_observer(passive_bot, active_state.street, "CHECK", False)
+                    _notify_observer(passive_bot, active_state.street, "CHECK", False, amount=0, pot=active_state.pot)
                     if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
                         break
                 else:
@@ -369,7 +374,7 @@ class SneakPeekEngine:
                         acted_bb = True
                     if action_log is not None:
                         action_log.append({"street": active_state.street, "player": active_bot.name, "action": "CALL", "amount": call_amount, "pot": active_state.pot})
-                    _notify_observer(passive_bot, active_state.street, "CALL", True)
+                    _notify_observer(passive_bot, active_state.street, "CALL", True, amount=call_amount, pot=active_state.pot)
                     if acted_sb and acted_bb and sb_state.my_wager == bb_state.my_wager:
                         break
                     # SB limp gives BB the option; otherwise a call closes.
@@ -404,7 +409,7 @@ class SneakPeekEngine:
 
                 if action_log is not None:
                     action_log.append({"street": active_state.street, "player": active_bot.name, "action": "RAISE", "amount": amount, "pot": active_state.pot})
-                _notify_observer(passive_bot, active_state.street, "RAISE", faced_bet)
+                _notify_observer(passive_bot, active_state.street, "RAISE", faced_bet, amount=amount, pot=active_state.pot)
 
             else:
                 if action_log is not None:

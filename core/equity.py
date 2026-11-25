@@ -69,9 +69,14 @@ PREFLOP_EQUITY = {
     '43o': 0.354, '42o': 0.336, '32o': 0.325,
 }
 
+# Precomputed 52x52 lookup table for sub-nanosecond preflop equity lookup
+_PREFLOP_2D_TABLE = [
+    [PREFLOP_EQUITY.get(get_canonical_hand(c1, c2), 0.500) if c1 != c2 else 0.500 for c2 in range(52)]
+    for c1 in range(52)
+]
+
 def get_preflop_equity(c1: int, c2: int) -> float:
-    key = get_canonical_hand(c1, c2)
-    return PREFLOP_EQUITY.get(key, 0.500)
+    return _PREFLOP_2D_TABLE[c1][c2]
 
 
 # Sorted preflop equities for range-cutoff lookup: the top `w` fraction of
@@ -101,7 +106,7 @@ def range_hand_weight(
     toward strong hole cards when villain showed aggression; `board_hit_bonus`
     upweights combos pairing the board when facing a postflop bet.
     """
-    eq = get_preflop_equity(c1, c2)
+    eq = _PREFLOP_2D_TABLE[c1][c2]
     w = 1.0 if eq >= cutoff else 0.12
     if strength_slope:
         w *= 1.0 + strength_slope * (eq - 0.5)

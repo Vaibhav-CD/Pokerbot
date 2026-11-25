@@ -361,6 +361,20 @@ class TestRangeEquity(unittest.TestCase):
         amt = get_optimal_bet_size("FLOP", 4000, 4000, 200, 0.90)
         self.assertGreater(amt, 100)
 
+    def test_cost_elasticity_tracking(self):
+        from strategy.opponent_model import OpponentModel
+        m = OpponentModel()
+        m.observe("FLOP", "CALL", faced_bet=True, amount=60)
+        m.observe("TURN", "CALL", faced_bet=True, amount=120)
+        m.observe("RIVER", "FOLD", faced_bet=True, amount=180)
+        m.observe("FLOP", "FOLD", faced_bet=True, amount=160)
+        self.assertEqual(m.min_folded_cost, 160)
+        self.assertEqual(m.max_called_cost, 120)
+        # Value bet should be capped below 160
+        self.assertLessEqual(m.get_exploitative_bet_cap(300), 155)
+        # Bluff target should be above 160
+        self.assertGreaterEqual(m.get_exploitative_bluff_target(20, 200), 165)
+
 
 if __name__ == '__main__':
     unittest.main()
